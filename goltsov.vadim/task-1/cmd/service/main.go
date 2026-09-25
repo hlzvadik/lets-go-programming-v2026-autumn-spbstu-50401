@@ -8,18 +8,18 @@ func main() {
 		b         int
 		operation string
 	)
-	_, err1 := fmt.Scanln(&a)
-	_, err2 := fmt.Scanln(&b)
-	_, err3 := fmt.Scanln(&operation)
-	if err1 != nil {
+	_, err := fmt.Scanln(&a)
+	if err != nil {
 		fmt.Println("Invalid first operand")
 		return
 	}
-	if err2 != nil {
+	_, err = fmt.Scanln(&b)
+	if err != nil {
 		fmt.Println("Invalid second operand")
 		return
 	}
-	if err3 != nil {
+	_, err = fmt.Scanln(&operation)
+	if err != nil {
 		fmt.Println("Invalid operation")
 		return
 	}
