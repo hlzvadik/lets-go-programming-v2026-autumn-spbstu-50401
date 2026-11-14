@@ -5,10 +5,14 @@ import (
 	"encoding/xml"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 
+	"golang.org/x/text/encoding/charmap"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,9 +27,9 @@ type ValCurs struct {
 }
 
 type Valute struct {
-	NumCode  int     `xml:"NumCode"`
-	CharCode string  `xml:"CharCode"`
-	Value    float64 `xml:"Value"`
+	NumCode  int    `xml:"NumCode"`
+	CharCode string `xml:"CharCode"`
+	Value    string `xml:"Value"`
 }
 
 type OutputItem struct {
@@ -49,27 +53,51 @@ func main() {
 		panic(fmt.Sprintf("Error parsing config file: %s", err))
 	}
 
-	xmlData, err := os.ReadFile(config.InputFile)
+	xmlFile, err := os.Open(config.InputFile)
 	if err != nil {
-		panic(fmt.Sprintf("Error reading input file: %s", err))
+		panic(fmt.Sprintf("Error opening input file: %s", err))
 	}
+	defer xmlFile.Close()
 
 	var valCurs ValCurs
-	err = xml.Unmarshal(xmlData, &valCurs)
+	decoder := xml.NewDecoder(xmlFile)
+	decoder.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
+		if charset == "windows-1251" {
+			return charmap.Windows1251.NewDecoder().Reader(input), nil
+		}
+		return nil, fmt.Errorf("unknown charset: %s", charset)
+	}
+
+	err = decoder.Decode(&valCurs)
 	if err != nil {
 		panic(fmt.Sprintf("Error parsing input file: %s", err))
 	}
 
 	sort.Slice(valCurs.Valute, func(i, j int) bool {
-		return valCurs.Valute[i].Value < valCurs.Valute[j].Value
+		goodStringFloat1 := strings.ReplaceAll(valCurs.Valute[i].Value, ",", ".")
+		goodFloat1, err := strconv.ParseFloat(goodStringFloat1, 64)
+		if err != nil {
+			panic(fmt.Sprintf("Error parsing input file: %s", err))
+		}
+		goodStringFloat2 := strings.ReplaceAll(valCurs.Valute[j].Value, ",", ".")
+		goodFloat2, err := strconv.ParseFloat(goodStringFloat2, 64)
+		if err != nil {
+			panic(fmt.Sprintf("Error parsing input file: %s", err))
+		}
+		return goodFloat1 > goodFloat2
 	})
 
 	var outputItems []OutputItem
 	for _, val := range valCurs.Valute {
+		goodStringFloat := strings.ReplaceAll(val.Value, ",", ".")
+		goodFloat, err := strconv.ParseFloat(goodStringFloat, 64)
+		if err != nil {
+			panic(fmt.Sprintf("Error parsing input file: %s", err))
+		}
 		outputItems = append(outputItems, OutputItem{
 			NumCode:  val.NumCode,
 			CharCode: val.CharCode,
-			Value:    val.Value,
+			Value:    goodFloat,
 		})
 	}
 
