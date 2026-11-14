@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +15,22 @@ import (
 
 	"golang.org/x/text/encoding/charmap"
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	outputDirPerm  = 0o750
+	outputFilePerm = 0o600
+)
+
+var (
+	ErrReadConfig       = errors.New("error reading config file")
+	ErrParseConfig      = errors.New("error parsing config file")
+	ErrOpenInput        = errors.New("error opening input file")
+	ErrUnknownCharset   = errors.New("unknown charset")
+	ErrParseInput       = errors.New("error parsing input file")
+	ErrMarshalJSON      = errors.New("error marshalling json")
+	ErrCreateOutputDir  = errors.New("error creating output directory")
+	ErrCreateOutputFile = errors.New("error creating output file")
 )
 
 type Config struct {
@@ -42,58 +59,108 @@ func main() {
 	configPath := flag.String("config", "config.yaml", "Path to config file")
 	flag.Parse()
 
-	configData, err := os.ReadFile(*configPath)
+	config, err := loadConfig(*configPath)
 	if err != nil {
-		panic(fmt.Sprintf("Error reading config file: %s", err))
+		panic(err)
 	}
 
+	valCurs, err := parseXML(config.InputFile)
+	if err != nil {
+		panic(err)
+	}
+
+	sortValute(valCurs.Valute)
+
+	outputItems, err := convertToOutput(valCurs.Valute)
+	if err != nil {
+		panic(err)
+	}
+
+	if err := saveOutput(config.OutputFile, outputItems); err != nil {
+		panic(err)
+	}
+}
+
+func loadConfig(path string) (Config, error) {
 	var config Config
-	err = yaml.Unmarshal(configData, &config)
+
+	configData, err := os.ReadFile(path)
 	if err != nil {
-		panic(fmt.Sprintf("Error parsing config file: %s", err))
+		return config, fmt.Errorf("%w: %w", ErrReadConfig, err)
 	}
 
-	xmlFile, err := os.Open(config.InputFile)
-	if err != nil {
-		panic(fmt.Sprintf("Error opening input file: %s", err))
+	if err := yaml.Unmarshal(configData, &config); err != nil {
+		return config, fmt.Errorf("%w: %w", ErrParseConfig, err)
 	}
-	defer xmlFile.Close()
 
+	return config, nil
+}
+
+func parseXML(path string) (ValCurs, error) {
 	var valCurs ValCurs
+
+	xmlFile, err := os.Open(path)
+	if err != nil {
+		return valCurs, fmt.Errorf("%w: %w", ErrOpenInput, err)
+	}
+
+	defer func() {
+		_ = xmlFile.Close()
+	}()
+
 	decoder := xml.NewDecoder(xmlFile)
+
 	decoder.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
 		if charset == "windows-1251" {
 			return charmap.Windows1251.NewDecoder().Reader(input), nil
 		}
-		return nil, fmt.Errorf("unknown charset: %s", charset)
+
+		return nil, fmt.Errorf("%w: %s", ErrUnknownCharset, charset)
 	}
 
-	err = decoder.Decode(&valCurs)
+	if err := decoder.Decode(&valCurs); err != nil {
+		return valCurs, fmt.Errorf("%w: %w", ErrParseInput, err)
+	}
+
+	return valCurs, nil
+}
+
+func parseValue(value string) (float64, error) {
+	goodStringFloat := strings.ReplaceAll(value, ",", ".")
+
+	res, err := strconv.ParseFloat(goodStringFloat, 64)
 	if err != nil {
-		panic(fmt.Sprintf("Error parsing input file: %s", err))
+		return 0, fmt.Errorf("%w: %w", ErrParseInput, err)
 	}
 
-	sort.Slice(valCurs.Valute, func(i, j int) bool {
-		goodStringFloat1 := strings.ReplaceAll(valCurs.Valute[i].Value, ",", ".")
-		goodFloat1, err := strconv.ParseFloat(goodStringFloat1, 64)
+	return res, nil
+}
+
+func sortValute(valutes []Valute) {
+	sort.Slice(valutes, func(i, jIndex int) bool {
+		goodFloat1, err := parseValue(valutes[i].Value)
 		if err != nil {
-			panic(fmt.Sprintf("Error parsing input file: %s", err))
+			panic(err)
 		}
-		goodStringFloat2 := strings.ReplaceAll(valCurs.Valute[j].Value, ",", ".")
-		goodFloat2, err := strconv.ParseFloat(goodStringFloat2, 64)
+
+		goodFloat2, err := parseValue(valutes[jIndex].Value)
 		if err != nil {
-			panic(fmt.Sprintf("Error parsing input file: %s", err))
+			panic(err)
 		}
+
 		return goodFloat1 > goodFloat2
 	})
+}
 
-	var outputItems []OutputItem
-	for _, val := range valCurs.Valute {
-		goodStringFloat := strings.ReplaceAll(val.Value, ",", ".")
-		goodFloat, err := strconv.ParseFloat(goodStringFloat, 64)
+func convertToOutput(valutes []Valute) ([]OutputItem, error) {
+	outputItems := make([]OutputItem, 0, len(valutes))
+
+	for _, val := range valutes {
+		goodFloat, err := parseValue(val.Value)
 		if err != nil {
-			panic(fmt.Sprintf("Error parsing input file: %s", err))
+			return nil, err
 		}
+
 		outputItems = append(outputItems, OutputItem{
 			NumCode:  val.NumCode,
 			CharCode: val.CharCode,
@@ -101,20 +168,24 @@ func main() {
 		})
 	}
 
-	jsonData, err := json.MarshalIndent(outputItems, "", "  ")
+	return outputItems, nil
+}
+
+func saveOutput(path string, items []OutputItem) error {
+	jsonData, err := json.MarshalIndent(items, "", "  ")
 	if err != nil {
-		panic(fmt.Sprintf("Error marshalling json: %s", err))
+		return fmt.Errorf("%w: %w", ErrMarshalJSON, err)
 	}
 
-	outputDir := filepath.Dir(config.OutputFile)
-	err = os.MkdirAll(outputDir, os.ModePerm)
-	if err != nil {
-		panic(fmt.Sprintf("Error creating output directory: %s", err))
+	outputDir := filepath.Dir(path)
+
+	if err := os.MkdirAll(outputDir, outputDirPerm); err != nil {
+		return fmt.Errorf("%w: %w", ErrCreateOutputDir, err)
 	}
 
-	err = os.WriteFile(config.OutputFile, jsonData, os.ModePerm)
-	if err != nil {
-		panic(fmt.Sprintf("Error creating output file: %s", err))
+	if err := os.WriteFile(path, jsonData, outputFilePerm); err != nil {
+		return fmt.Errorf("%w: %w", ErrCreateOutputFile, err)
 	}
 
+	return nil
 }
